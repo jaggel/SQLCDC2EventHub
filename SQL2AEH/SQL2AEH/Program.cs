@@ -7,6 +7,7 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -79,6 +80,7 @@ namespace SQL2AEH
             int SQLBatchSize = Convert.ToInt32(ConfigurationManager.AppSettings["SQLBatchSize"]);
             int ExecutionControl = Convert.ToInt32(ConfigurationManager.AppSettings["ExecutionControl"]);
             int ExecutionControlSleepMs = Convert.ToInt32(ConfigurationManager.AppSettings["ExecutionControlSleepMs"]);
+            int CompressionFlag = Convert.ToInt32(ConfigurationManager.AppSettings["CompressionFlag"]);
 
             // VARIABLES
             string updateOffsetQuery;
@@ -119,8 +121,12 @@ namespace SQL2AEH
                     // GROUP ROWS TO SEND INTO A MESSAGE BATCH
                     foreach (var resultGroup in orderedByColumnName.Split(SQLBatchSize))
                     {
-                        // SEND BATCH ROWS TO EVENT HUB AS JSON MESSAGE
-                        SendRowsToEventHub(eventHubClient, resultGroup).Wait();
+                        if (CompressionFlag == 0) 
+                            // SEND BATCH ROWS TO EVENT HUB AS JSON MESSAGE
+                            SendRowsToEventHub(eventHubClient, resultGroup).Wait();
+                        else
+                            // SEND BATCH ROWS TO EVENT HUB AS JSON MESSAGE
+                            SendCompressedRowsToEventHub(eventHubClient, resultGroup).Wait();
 
                         // UPDATE CURRENT VALUE IN SQL TABLE OFFSET
                         nextOffset = resultGroup.Max(r => r["SQL2AEH_$start_lsn_string"].ToString());
@@ -144,6 +150,26 @@ namespace SQL2AEH
             var memoryStream = new MemoryStream();
 
             using (var sw = new StreamWriter(memoryStream, new UTF8Encoding(false), 1024, leaveOpen: true))
+            {
+                string serialized = JsonConvert.SerializeObject(rows);
+                sw.Write(serialized);
+                sw.Flush();
+            }
+
+            Debug.Assert(memoryStream.Position > 0, "memoryStream.Position > 0");
+
+            memoryStream.Position = 0;
+            EventData eventData = new EventData(memoryStream);
+
+            await eventHubClient.SendAsync(eventData);
+        }
+
+        private static async Task SendCompressedRowsToEventHub(EventHubClient eventHubClient, IEnumerable<object> rows)
+        {
+            var memoryStream = new MemoryStream();
+
+            using (var zip = new GZipStream(memoryStream, CompressionMode.Compress))
+            using (var sw = new StreamWriter(zip, new UTF8Encoding(false), 1024, leaveOpen: true))
             {
                 string serialized = JsonConvert.SerializeObject(rows);
                 sw.Write(serialized);
